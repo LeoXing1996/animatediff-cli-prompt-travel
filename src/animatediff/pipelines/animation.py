@@ -22,7 +22,7 @@ from diffusers.utils import (BaseOutput, deprecate, is_accelerate_available,
                              randn_tensor)
 from einops import rearrange
 from packaging import version
-from tqdm.rich import tqdm
+from tqdm import tqdm
 from transformers import CLIPImageProcessor, CLIPTokenizer
 
 from animatediff.ip_adapter import IPAdapter, IPAdapterPlus
@@ -2130,6 +2130,10 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         )
 
         # 7. Denoising loop
+        # controlnet_frame_counter_dict = {control: [[0] * num_inference_steps for _ in range(latents.shape[2])] for control in controlnet_scale_map.keys()}
+        controlnet_frame_counter_dict = {control: np.zeros((num_inference_steps, latents.shape[2])) for control in controlnet_scale_map.keys()}
+        timestep_counter = np.zeros((num_inference_steps, latents.shape[2]))
+        denoising_context_dict = {}
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         with self.progress_bar(total=total_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -2178,6 +2182,8 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                                     dtype=first_mid.dtype,
                                     )
 
+                    nonlocal controlnet_frame_counter_dict
+
                     for fr in controlnet_result:
                         for type_str in controlnet_result[fr]:
                             result = str(fr) + "_" + type_str
@@ -2201,6 +2207,11 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                                         loc_index.append(j)
                                         break
 
+                            # static control counter for debug
+                            for o in loc:
+                                for f in context:
+                                    if o == f:
+                                        controlnet_frame_counter_dict[result][i][f] += 1
                             mod = torch.tensor(scales).to(device, dtype=cur_mid.dtype)
 
                             add = cur_mid * mod[None,None,:,None,None]
@@ -2293,6 +2304,10 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                 for context in context_scheduler(
                     i, num_inference_steps, latents.shape[2], context_frames, context_stride, context_overlap
                 ):
+                    if i not in denoising_context_dict:
+                        denoising_context_dict[i] = []
+                    denoising_context_dict[i].append(context)
+                    timestep_counter[i][context] += 1
                     if controlnet_image_map:
                         controlnet_target = list(range(context[0]-context_frames, context[0])) + context + list(range(context[-1]+1, context[-1]+1+context_frames))
                         controlnet_target = [f%video_length for f in controlnet_target]
