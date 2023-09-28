@@ -325,6 +325,27 @@ def create_pipeline(
     else:
         logger.info("Using base model weights (no checkpoint/LoRA)")
 
+    # Load the VAE
+    if model_config.vae_path is not None:
+        vae_path = data_dir.joinpath(model_config.vae_path)
+        logger.info(f"Loading VAE weights from {vae_path}")
+        if vae_path.is_file():
+            logger.debug("Loading from single checkpoint file")
+            if vae_path.suffix == 'safetensors':
+                from safetensors import safe_open
+                vae_state_dict = {}
+                with safe_open(vae_path.absolute(), framework='pt') as file:
+                    for k in file.keys():
+                        vae_state_dict[k] = file.get_tensor(k)
+            elif vae_path.suffix == 'ckpt':
+                vae_state_dict = torch.load(vae_path.absolute(), map_location='cpu')
+
+            vae_missing, _ = vae.load_state_dict(vae_state_dict, strict=False)
+            if len(vae_missing) > 0:
+                raise ValueError(f"VAE has missing keys: {vae_missing}")
+        else:
+            raise ValueError('Only support single VAE file.')
+
     # enable xformers if available
     if use_xformers:
         logger.info("Enabling xformers memory-efficient attention")
