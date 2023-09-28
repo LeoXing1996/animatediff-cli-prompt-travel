@@ -26,6 +26,7 @@ from animatediff import get_dir
 from animatediff.models.clip import CLIPSkipTextModel
 from animatediff.models.unet import UNet3DConditionModel
 from animatediff.pipelines import AnimationPipeline, load_text_embeddings
+from animatediff.pipelines.animation_hires import AnimationHiresPipeline
 from animatediff.pipelines.pipeline_controlnet_img2img_reference import \
     StableDiffusionControlNetImg2ImgReferencePipeline
 from animatediff.schedulers import get_scheduler
@@ -253,6 +254,7 @@ def create_pipeline(
     model_config: ModelConfig = ...,
     infer_config: InferenceConfig = ...,
     use_xformers: bool = True,
+    is_hires: bool = False,
 ) -> AnimationPipeline:
     """Create an AnimationPipeline from a pretrained model.
     Uses the base_model argument to load or download the pretrained reference pipeline model."""
@@ -293,7 +295,7 @@ def create_pipeline(
     logger.info(f'Using scheduler "{model_config.scheduler}" ({scheduler.__class__.__name__})')
 
     # Load the checkpoint weights into the pipeline
-    if model_config.path is not None:
+    if model_config.path is not None and model_config.path != "":
         model_path = data_dir.joinpath(model_config.path)
         logger.info(f"Loading weights from {model_path}")
         if model_path.is_file():
@@ -326,7 +328,7 @@ def create_pipeline(
         logger.info("Using base model weights (no checkpoint/LoRA)")
 
     # Load the VAE
-    if model_config.vae_path is not None:
+    if model_config.vae_path is not None and str(model_config.vae_path).upper() != 'NONE':
         vae_path = data_dir.joinpath(model_config.vae_path)
         logger.info(f"Loading VAE weights from {vae_path}")
         if vae_path.is_file():
@@ -361,15 +363,26 @@ def create_pipeline(
 
 
     logger.info("Creating AnimationPipeline...")
-    pipeline = AnimationPipeline(
-        vae=vae,
-        text_encoder=text_encoder,
-        tokenizer=tokenizer,
-        unet=unet,
-        scheduler=scheduler,
-        feature_extractor=feature_extractor,
-        controlnet_map=None,
-    )
+    if is_hires:
+        pipeline = AnimationHiresPipeline(
+            vae=vae,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            unet=unet,
+            scheduler=scheduler,
+            feature_extractor=feature_extractor,
+            controlnet_map=None,
+        )
+    else:
+        pipeline = AnimationPipeline(
+            vae=vae,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            unet=unet,
+            scheduler=scheduler,
+            feature_extractor=feature_extractor,
+            controlnet_map=None,
+        )
 
     # Load TI embeddings
     load_text_embeddings(pipeline)
@@ -388,7 +401,7 @@ def load_controlnet_models(pipe: AnimationPipeline, model_config: ModelConfig = 
                 if item["enable"] == True:
                     img_dir = c_image_dir.joinpath( c )
                     cond_imgs = sorted(glob.glob( os.path.join(img_dir, "[0-9]*.png"), recursive=False))
-                    if len(cond_imgs) > 0:
+                    if len(cond_imgs) > 0 and c != 'controlnet_ref':
                         logger.info(f"loading {c=} model")
                         controlnet_map[c] = create_controlnet_model( c )
 
@@ -489,6 +502,87 @@ def create_us_pipeline(
                     load_safety_checker=False,
                     safety_checker=None,
                 )
+        else:
+            raise FileNotFoundError(f"model_path {model_path} is not a file or directory")
+    else:
+        raise ValueError("model_config.path is invalid")
+
+    pipeline.scheduler = scheduler
+
+    # enable xformers if available
+    if use_xformers:
+        logger.info("Enabling xformers memory-efficient attention")
+        pipeline.enable_xformers_memory_efficient_attention()
+
+    # lora
+    for l in model_config.lora_map:
+        lora_path = data_dir.joinpath(l)
+        if lora_path.is_file():
+            logger.info(f"Loading lora {lora_path}")
+            logger.info(f"alpha = {model_config.lora_map[l]}")
+            load_safetensors_lora(pipeline.text_encoder, pipeline.unet, lora_path, alpha=model_config.lora_map[l],is_animatediff=False)
+
+    # Load TI embeddings
+    load_text_embeddings(pipeline)
+
+    return pipeline
+
+def create_hires_pipeline(
+    model_config: ModelConfig = ...,
+    infer_config: InferenceConfig = ...,
+    use_xformers: bool = True,
+) -> DiffusionPipeline:
+
+    # set up scheduler
+    sched_kwargs = infer_config.noise_scheduler_kwargs
+    scheduler = get_scheduler(model_config.scheduler, sched_kwargs)
+    logger.info(f'Using scheduler "{model_config.scheduler}" ({scheduler.__class__.__name__})')
+
+    controlnet = []
+
+    if len(controlnet) == 1:
+        controlnet = controlnet[0]
+
+    # Load the checkpoint weights into the pipeline
+    pipeline:DiffusionPipeline
+
+    if model_config.path is not None:
+        model_path = data_dir.joinpath(model_config.path)
+        logger.info(f"Loading weights from {model_path}")
+        if model_path.is_file():
+
+            def is_empty_dir(path):
+                import os
+                return len(os.listdir(path)) == 0
+
+            save_path = data_dir.joinpath("models/huggingface/" + model_path.stem + "_" + str(model_path.stat().st_size))
+            save_path.mkdir(exist_ok=True)
+            if save_path.is_dir() and is_empty_dir(save_path):
+                # StableDiffusionControlNetImg2ImgPipeline.from_single_file does not exist in version 18.2
+                logger.debug("Loading from single checkpoint file")
+                tmp_pipeline = StableDiffusionPipeline.from_single_file(
+                    pretrained_model_link_or_path=str(model_path.absolute())
+                )
+                tmp_pipeline.save_pretrained(save_path, safe_serialization=True)
+                del tmp_pipeline
+
+            pipeline = AnimationHiresPipeline.from_pretrained(
+                save_path,
+                controlnet=controlnet,
+                local_files_only=False,
+                load_safety_checker=False,
+                safety_checker=None,
+            )
+
+        elif model_path.is_dir():
+            logger.debug("Loading from Diffusers model directory")
+            pipeline = AnimationHiresPipeline.from_pretrained(
+                model_path,
+                controlnet=controlnet,
+                local_files_only=True,
+                load_safety_checker=False,
+                safety_checker=None,
+            )
         else:
             raise FileNotFoundError(f"model_path {model_path} is not a file or directory")
     else:
@@ -729,7 +823,7 @@ def run_inference(
     prompt_str = "_".join((prompt_tags[:6]))
 
     frame_dir = out_dir.joinpath(f"{idx:02d}-{seed}")
-    out_file = out_dir.joinpath(f"{idx:02d}_{seed}_{prompt_str}")
+    out_file = out_dir.joinpath(f"{idx:02d}_{seed}")
 
     output_format = "gif"
     output_fps = 8

@@ -1,6 +1,7 @@
 import glob
 import logging
 import os.path
+import os.path as osp
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
@@ -11,11 +12,13 @@ from diffusers.utils.logging import \
     set_verbosity_error as set_diffusers_verbosity_error
 from rich.logging import RichHandler
 
+from animatediff.utils.util import save_frames, save_image
 from animatediff import __version__, console, get_dir
 from animatediff.generate import (controlnet_preprocess, create_pipeline,
                                   create_us_pipeline, ip_adapter_preprocess,
                                   load_controlnet_models, run_inference,
-                                  run_upscale, unload_controlnet_models)
+                                  run_upscale, unload_controlnet_models,
+                                  create_hires_pipeline)
 from animatediff.pipelines import AnimationPipeline, load_text_embeddings
 from animatediff.settings import (CKPT_EXTENSIONS, InferenceConfig,
                                   ModelConfig, get_infer_config,
@@ -437,6 +440,241 @@ def generate(
     cli.info
 
     return save_dir
+
+
+@cli.command()
+def hires_upscale(
+    input_dir: Annotated[
+        Path,
+        typer.Argument(path_type=Path, file_okay=False, exists=True, help="Path to source frames directory"),
+    ] = ...,
+    strength: Annotated[
+        float,
+        typer.Option('--strength')
+    ] = ...,
+    model_name_or_path: Annotated[
+        Path,
+        typer.Option(
+            ...,
+            "--model-path",
+            "-m",
+            path_type=Path,
+            help="Base model to use (path or HF repo ID). You probably don't need to change this.",
+        ),
+    ] = Path("runwayml/stable-diffusion-v1-5"),
+    width: Annotated[
+        int,
+        typer.Option(
+            "--width",
+            "-W",
+            min=-1,
+            max=3840,
+            help="Width of generated frames",
+            rich_help_panel="Generation",
+        ),
+    ] = -1,
+    height: Annotated[
+        int,
+        typer.Option(
+            "--height",
+            "-H",
+            min=-1,
+            max=2160,
+            help="Height of generated frames",
+            rich_help_panel="Generation",
+        ),
+    ] = -1,
+    device: Annotated[
+        str,
+        typer.Option(
+            "--device", "-d", help="Device to run on (cpu, cuda, cuda:id)", rich_help_panel="Advanced"
+        ),
+    ] = "cuda",
+    use_xformers: Annotated[
+        bool,
+        typer.Option(
+            "--xformers",
+            "-x",
+            is_flag=True,
+            help="Use XFormers instead of SDP Attention",
+            rich_help_panel="Advanced",
+        ),
+    ] = False,
+    force_half_vae: Annotated[
+        bool,
+        typer.Option(
+            "--half-vae",
+            is_flag=True,
+            help="Force VAE to use fp16 (not recommended)",
+            rich_help_panel="Advanced",
+        ),
+    ] = False,
+    out_dir: Annotated[
+        Path,
+        typer.Option(
+            "--out-dir",
+            "-o",
+            path_type=Path,
+            file_okay=False,
+            help="Directory for output folders (frames, gifs, etc)",
+            rich_help_panel="Output",
+        ),
+    ] = Path("upscaled/"),
+    no_frames: Annotated[
+        bool,
+        typer.Option(
+            "--no-frames",
+            "-N",
+            is_flag=True,
+            help="Don't save frames, only the animation",
+            rich_help_panel="Output",
+        ),
+    ] = False,
+):
+    """Upscale frames using hires"""
+    # be quiet, diffusers. we care not for your safety checker
+    set_diffusers_verbosity_error()
+
+    if width < 0 and height < 0:
+        raise ValueError(f"invalid width,height: {width},{height} \n At least one of them must be specified.")
+
+    # 1. find frames
+    flag = False
+    for f in os.listdir(input_dir):
+        if osp.isdir(osp.join(input_dir, f)) and 'detectmap' not in f and 'ip_adapter' not in f:
+            flag = True
+            break
+
+    assert flag, (f'Cannot found frame folder under "{input_dir}"')
+    frames_dir = osp.join(input_dir, f)
+    # frame_list = [
+    #     osp.join(frame_dir, frame) for frame in os.listdir(frame_dir)
+    # ]
+    # frame_list = sorted(frame_list)
+    config_path = Path(osp.join(input_dir, 'prompt.json'))
+
+    config_path = config_path.absolute()
+    logger.info(f"Using generation config: {path_from_cwd(config_path)}")
+    model_config: ModelConfig = get_model_config(config_path)
+    infer_config: InferenceConfig = get_infer_config(is_v2_motion_module(model_config.motion_module))
+    frames_dir = Path(frames_dir).absolute()
+
+    # turn the device string into a torch.device
+    device: torch.device = torch.device(device)
+
+    # get a timestamp for the output directory
+    time_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    # make the output directory
+    save_dir = out_dir.joinpath(f"{time_str}-{model_config.save_name}")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Will save outputs to ./{path_from_cwd(save_dir)}")
+
+
+    use_controlnet_ref = False
+    use_controlnet_tile = False
+    use_controlnet_line_anime = False
+    use_controlnet_ip2p = False
+
+    # beware the pipeline
+    base_model_path: Path = get_base_model(
+        model_name_or_path,
+        local_dir=get_dir("data/models/huggingface"))
+    us_pipeline = create_pipeline(
+            base_model=base_model_path,
+            model_config=model_config,
+            infer_config=infer_config,
+            use_xformers=use_xformers,
+            is_hires=True
+        )
+
+    if us_pipeline.device == device:
+        logger.info("Pipeline already on the correct device, skipping device transfer")
+    else:
+        us_pipeline = send_to_device(
+            us_pipeline, device, freeze=True, force_half=force_half_vae, compile=model_config.compile
+        )
+
+
+    model_config.result = { "original_frames": str(frames_dir) }
+
+
+    # save config to output directory
+    logger.info("Saving prompt config to output directory")
+    save_config_path = save_dir.joinpath("prompt.json")
+    save_config_path.write_text(model_config.json(indent=4), encoding="utf-8")
+
+    num_prompts = 1
+    num_negatives = len(model_config.n_prompt)
+    num_seeds = len(model_config.seed)
+
+    logger.info("Initialization complete!")
+
+    gen_num = 0  # global generation index
+
+    org_images = sorted(glob.glob( os.path.join(frames_dir, "[0-9]*.png"), recursive=False))
+    length = len(org_images)
+
+    if model_config.prompt_map:
+        # get the index of the prompt, negative, and seed
+        idx = gen_num % num_prompts
+        logger.info(f"Running generation {gen_num + 1} of {1} (prompt {idx + 1})")
+
+        # allow for reusing the same negative prompt(s) and seed(s) for multiple prompts
+        n_prompt = model_config.n_prompt[idx % num_negatives]
+        seed = seed = model_config.seed[idx % num_seeds]
+
+        if seed == -1:
+            seed = torch.seed()
+        logger.info(f"Generation seed: {seed}")
+
+        prompt_map = {}
+        for k in model_config.prompt_map.keys():
+            if int(k) < length:
+                pr = model_config.prompt_map[k]
+                if model_config.head_prompt:
+                    pr = model_config.head_prompt + "," + pr
+                if model_config.tail_prompt:
+                    pr = pr + "," + model_config.tail_prompt
+
+                prompt_map[int(k)]=pr
+
+        import numpy as np
+        from PIL import Image
+        org_images = [np.array(Image.open(f)) for f in org_images]
+
+        def np_to_ten(array):
+            ten = torch.from_numpy(array).permute(2, 0, 1).float()
+            ten = ten / 127.5 - 1
+            return ten
+        org_images = [np_to_ten(arr) for arr in org_images]
+        org_images = torch.stack(org_images, dim=0)[None, ...]
+
+        upscaled_output = us_pipeline(
+            org_images,
+            strength,
+            prompt='this is a dummy prompt',
+            height=height,
+            width=width, num_inference_steps=model_config.steps,
+            guidance_scale=model_config.guidance_scale,
+            negative_prompt=n_prompt,
+            video_length=length,
+            generator=torch.manual_seed(seed),
+            prompt_map=prompt_map, clip_skip=model_config.clip_skip,
+            return_dict=False)
+
+        save_frames(upscaled_output, save_dir.joinpath('frames'))
+        save_video(upscaled_output, save_dir.joinpath(f"{gen_num:02d}-{seed}-upscaled.gif"), 8)
+
+        # increment the generation number
+        gen_num += 1
+
+    logger.info("Generation complete!")
+
+    logger.info("Done, exiting...")
+    cli.info
+
+    return save_dir
+
 
 @cli.command()
 def tile_upscale(
