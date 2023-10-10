@@ -446,12 +446,21 @@ def generate(
 def hires_upscale(
     input_dir: Annotated[
         Path,
-        typer.Argument(path_type=Path, file_okay=False, exists=True, help="Path to source frames directory"),
+        typer.Argument(path_type=Path,
+                       file_okay=False,
+                       exists=True,
+                       help="Path to source frames directory"),
     ] = ...,
-    strength: Annotated[
-        float,
-        typer.Option('--strength')
-    ] = ...,
+    strength: Annotated[float, typer.Option('--strength')] = ...,
+    config: Annotated[
+        Path,
+        typer.Option(
+            "--config",
+            "-c",
+            path_type=Path,
+            help=
+            "Config used to upscale. If not defined, will use 'prompt.json' under 'input_dir'"
+        )] = None,
     model_name_or_path: Annotated[
         Path,
         typer.Option(
@@ -459,7 +468,8 @@ def hires_upscale(
             "--model-path",
             "-m",
             path_type=Path,
-            help="Base model to use (path or HF repo ID). You probably don't need to change this.",
+            help=
+            "Base model to use (path or HF repo ID). You probably don't need to change this.",
         ),
     ] = Path("runwayml/stable-diffusion-v1-5"),
     width: Annotated[
@@ -484,11 +494,19 @@ def hires_upscale(
             rich_help_panel="Generation",
         ),
     ] = -1,
+    latent_upscale: Annotated[
+        bool,
+        typer.Option("--latent-upscale",
+                     "-l",
+                     is_flag=True,
+                     help="Upscale latent space instead of frames"),
+    ] = False,
     device: Annotated[
         str,
-        typer.Option(
-            "--device", "-d", help="Device to run on (cpu, cuda, cuda:id)", rich_help_panel="Advanced"
-        ),
+        typer.Option("--device",
+                     "-d",
+                     help="Device to run on (cpu, cuda, cuda:id)",
+                     rich_help_panel="Advanced"),
     ] = "cuda",
     use_xformers: Annotated[
         bool,
@@ -530,6 +548,7 @@ def hires_upscale(
             rich_help_panel="Output",
         ),
     ] = False,
+    save_dir: Annotated[str, typer.Option("--save-dir")] = None,
 ):
     """Upscale frames using hires"""
     # be quiet, diffusers. we care not for your safety checker
@@ -551,7 +570,10 @@ def hires_upscale(
     #     osp.join(frame_dir, frame) for frame in os.listdir(frame_dir)
     # ]
     # frame_list = sorted(frame_list)
-    config_path = Path(osp.join(input_dir, 'prompt.json'))
+    if config is None:
+        config_path = Path(osp.join(input_dir, 'prompt.json'))
+    else:
+        config_path = config
 
     config_path = config_path.absolute()
     logger.info(f"Using generation config: {path_from_cwd(config_path)}")
@@ -562,10 +584,13 @@ def hires_upscale(
     # turn the device string into a torch.device
     device: torch.device = torch.device(device)
 
-    # get a timestamp for the output directory
-    time_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    # make the output directory
-    save_dir = out_dir.joinpath(f"{time_str}-{model_config.save_name}")
+    if save_dir is None:
+        # get a timestamp for the output directory
+        time_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        # make the output directory
+        save_dir = out_dir.joinpath(f"{time_str}-{model_config.save_name}")
+    else:
+        save_dir = out_dir.joinpath(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Will save outputs to ./{path_from_cwd(save_dir)}")
 
@@ -579,6 +604,9 @@ def hires_upscale(
     base_model_path: Path = get_base_model(
         model_name_or_path,
         local_dir=get_dir("data/models/huggingface"))
+
+    # add lora
+    # model_config.lora_map = {'models/lora/add_detail.safetensors': 1}
     us_pipeline = create_pipeline(
             base_model=base_model_path,
             model_config=model_config,
@@ -654,7 +682,9 @@ def hires_upscale(
             strength,
             prompt='this is a dummy prompt',
             height=height,
-            width=width, num_inference_steps=model_config.steps,
+            width=width,
+            is_latent_upscale=latent_upscale,
+            num_inference_steps=model_config.steps,
             guidance_scale=model_config.guidance_scale,
             negative_prompt=n_prompt,
             video_length=length,

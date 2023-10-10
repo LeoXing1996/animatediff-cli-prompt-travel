@@ -53,7 +53,7 @@ C_REF_MODE = "write"
 def torch_dfs(model: torch.nn.Module):
     result = [model]
     for child in model.children():
-            result += torch_dfs(child)
+        result += torch_dfs(child)
     return result
 
 
@@ -622,6 +622,7 @@ class AnimationHiresPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         device,
         generator,
         latents=None,
+        latent_upscale=True,
     ):
         shape = (
             batch_size,
@@ -642,44 +643,49 @@ class AnimationHiresPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         # video = video.to(self.vae.device, self.vae.dtype)
 
         # NOTE: --> upscale at image
-        video_h, video_w = video.shape[-2], video.shape[-1]
-        video = [torch.nn.functional.interpolate(video[0, i:i+1, ...], (height, width), mode='bilinear', align_corners=False) for i in range(video_length)]
-        logger.info(f"Upscaled video from {video_h}x{video_w} to {height}x{width}")
-        init_latents = [
-            self.vae.encode(v.to(self.vae.device, self.vae.dtype)).latent_dist.sample(generator) * self.vae.config.scaling_factor
-            for v in video
-        ]
+        if not latent_upscale:
+            video_h, video_w = video.shape[-2], video.shape[-1]
+            video = [torch.nn.functional.interpolate(video[0, i:i+1, ...], (height, width), mode='bilinear', align_corners=False) for i in range(video_length)]
+            logger.info(f"Upscaled video (pixel) from {video_h}x{video_w} to {height}x{width}")
+            init_latents = [
+                self.vae.encode(v.to(self.vae.device, self.vae.dtype)).latent_dist.sample(generator) * self.vae.config.scaling_factor
+                for v in video
+            ]
+            init_latents = torch.stack(init_latents, dim=2)  # to fp16
 
-        # NOTE: --> upscale at latent
-        # if generator is not None:
-        #     init_latents = [
-        #         self.vae.encode(video[0, i : i + 1, ...]).latent_dist.sample(generator) for i in range(video_length)
-        #     ]
-        # else:
-        #     init_latents = [
-        #         self.vae.encode(video[0, i : i + 1, ...]).latent_dist.sample() for i in range(video_length)
-        #     ]
+        else:
+            # NOTE: --> upscale at latent
+            if generator is not None:
+                init_latents = [
+                    self.vae.encode(video[0, i:i + 1, ...].to(
+                        self.vae.device,
+                        self.vae.dtype)).latent_dist.sample(generator) * self.vae.config.scaling_factor
+                    for i in range(video_length)
+                ]
+            else:
+                init_latents = [
+                    self.vae.encode(video[0, i:i + 1, ...].to(
+                        self.vae.device, self.vae.dtype)).latent_dist.sample() * self.vae.config.scaling_factor
+                    for i in range(video_length)
+                ]
 
-        init_latents = [latent.to(dtype) for latent in init_latents]
-        # init_latents = torch.stack(init_latents, dim=1).to(dtype)  # to fp16
-        # 5.1 upscale_latent
-        # latents_h, latents_w = init_latents[0].shape[-2], init_latents[0].shape[-1]
-        # if latents_h * self.vae_scale_factor != height or latents_w * self.vae_scale_factor != width:
-        #     new_h = height // self.vae_scale_factor
-        #     new_w = width // self.vae_scale_factor
-        #     # init_latents = torch.nn.functional.interpolate(init_latents, (new_h, new_w), mode="bilinear", align_corners=False)
-        #     init_latents = [
-        #         torch.nn.functional.interpolate(latent, (new_h, new_w), mode="bilinear", align_corners=False)
-        #         for latent in init_latents
-        #     ]
+            # init_latents = [latent.to(dtype) for latent in init_latents]
+            init_latents = torch.stack(init_latents, dim=2).to(dtype)  # to fp16
+            # 5.1 upscale_latent
+            latents_h, latents_w = init_latents[0].shape[-2], init_latents[0].shape[-1]
+            if latents_h * self.vae_scale_factor != height or latents_w * self.vae_scale_factor != width:
+                new_h = height // self.vae_scale_factor
+                new_w = width // self.vae_scale_factor
+                # init_latents = torch.nn.functional.interpolate(init_latents, (new_h, new_w), mode="bilinear", align_corners=False)
+                init_latents = [
+                    torch.nn.functional.interpolate(latent, (new_h, new_w), mode="bilinear", align_corners=False)
+                    for latent in init_latents
+                ]
 
-        #     logger.info(f"Upscaled latents from {latents_h}x{latents_w} to {new_h}x{new_w}")
+                init_latents = torch.stack(init_latents, dim=0)  # to fp16
+                logger.info(f"Upscaled latents from {latents_h}x{latents_w} to {new_h}x{new_w}")
 
-        init_latents = torch.stack(init_latents, dim=2)  # to fp16
         init_latents = self.scheduler.add_noise(init_latents, noise, timestep)
-        # init_latents = [
-        #     self.scheduler.add_noise(init_latent, noise, timestep) for init_latent in init_latents
-        # ]
         latents = init_latents
 
         # scale the initial noise by the standard deviation required by the scheduler
@@ -1787,6 +1793,7 @@ class AnimationHiresPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         prompt: Union[str, List[str]] = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
+        is_latent_upscale = True,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
         negative_prompt: Optional[Union[str, List[str]]] = None,
@@ -2145,6 +2152,7 @@ class AnimationHiresPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             latents_device,  # keep latents on cpu for sequential mode
             generator,
             latents,
+            latent_upscale=is_latent_upscale,
         )
         # 5.1 upscale_latent
         latents_h, latents_w = latents.shape[-2], latents.shape[-1]
