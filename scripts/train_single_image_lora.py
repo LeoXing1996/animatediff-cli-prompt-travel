@@ -1,35 +1,37 @@
 import logging
 import os
 import os.path as osp
+import re
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
 from typing import Union
 
-from tqdm import tqdm
 import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusers import AutoencoderKL, UNet2DConditionModel
+from diffusers.loaders import AttnProcsLayers, LoraLoaderMixin
 from diffusers.models.attention_processor import (
     AttnAddedKVProcessor, AttnAddedKVProcessor2_0, LoRAAttnAddedKVProcessor,
     LoRAAttnProcessor, LoRAAttnProcessor2_0, SlicedAttnAddedKVProcessor)
+from diffusers.pipelines import StableDiffusionPipeline
 from PIL import Image
 from rich.logging import RichHandler
-from transformers import (AutoImageProcessor, CLIPImageProcessor,
-                          CLIPTextModel, CLIPTokenizer,
-                          UperNetForSemanticSegmentation)
-from diffusers.loaders import AttnProcsLayers, LoraLoaderMixin
+from safetensors import safe_open
+from safetensors.torch import save_file
+from tqdm import tqdm
+from transformers import CLIPTokenizer
+import torch.nn as nn
 
-from diffusers.pipelines import StableDiffusionPipeline
-from animatediff.pipelines import AnimationPipeline, load_text_embeddings
-from animatediff.models.clip import CLIPSkipTextModel
 from animatediff import console, get_dir
 from animatediff.generate import create_pipeline
+from animatediff.models.clip import CLIPSkipTextModel
 from animatediff.models.unet import UNet3DConditionModel
+from animatediff.pipelines import AnimationPipeline
 from animatediff.settings import (ModelConfig, get_infer_config,
                                   get_model_config)
-from animatediff.utils.model import checkpoint_to_pipeline, get_base_model
+from animatediff.utils.model import get_base_model
 from animatediff.utils.pipeline import send_to_device
 from animatediff.utils.util import is_v2_motion_module, save_video
 
@@ -81,6 +83,9 @@ def get_args():
     parser.add_argument('--max-img-size', type=int, default=256)
     parser.add_argument('--force-half-vae', action='store_true')
     parser.add_argument('--save-dir', type=str)
+    parser.add_argument('--save-cvt-only',
+                        action='store_true',
+                        help='If true, only save the converted lora.')
 
     return parser.parse_args()
 
@@ -126,6 +131,61 @@ def main():
                args, config, args.disable_half)
 
 
+# def convert_lora(file: str):
+#     checkpoint = {}
+#     with safe_open(file, framework='pt') as file:
+#         for k in file.keys():
+#             checkpoint[k] = file.get_tensor(k)
+#     # if torch.cuda.is_available():
+#     #     device = 'cuda'
+#     #     checkpoint = torch.load(args.file, map_location=torch.device('cuda'))
+#     # else:
+#     #     device = 'cpu'
+#     #     # if on CPU or want to have maximum precision on GPU, use default full-precision setting
+#     #     checkpoint = torch.load(args.file, map_location=torch.device('cpu'))
+
+#     new_dict = dict()
+#     for idx, key in enumerate(checkpoint):
+#         new_key = re.sub(r'\.processor\.', '_', key)
+#         new_key = re.sub(r'mid_block\.', 'mid_block_', new_key)
+#         new_key = re.sub('_lora.up.', '.lora_up.', new_key)
+#         new_key = re.sub('_lora.down.', '.lora_down.', new_key)
+#         new_key = re.sub(r'\.(\d+)\.', '_\\1_', new_key)
+#         new_key = re.sub('to_out', 'to_out_0', new_key)
+#         new_key = 'lora_unet_' + new_key
+#         new_key = new_key.replace('_unet.', '_', 1)
+#         print(new_key)
+#         new_dict[new_key] = checkpoint[key]
+
+#     file_name = os.path.splitext(file)[0]  # get the file name without the extension
+#     new_lora_name = file_name + '_converted.safetensors'
+#     print("Saving " + new_lora_name)
+#     save_file(new_dict, new_lora_name)
+
+
+def convert_and_save(weights: dict, filename: str):
+    new_dict = dict()
+
+    for idx, key in enumerate(weights):
+        new_key = re.sub(r'\.processor\.', '_', key)
+        new_key = re.sub(r'mid_block\.', 'mid_block_', new_key)
+        new_key = re.sub('_lora.up.', '.lora_up.', new_key)
+        new_key = re.sub('_lora.down.', '.lora_down.', new_key)
+        new_key = re.sub(r'\.(\d+)\.', '_\\1_', new_key)
+        new_key = re.sub('to_out', 'to_out_0', new_key)
+        new_key = 'lora_unet_' + new_key
+        new_key = new_key.replace('_unet.', '_', 1)
+        new_dict[new_key] = weights[key]
+
+    file_name = os.path.splitext(filename)[
+        0]  # get the file name without the extension
+    new_lora_name = file_name + '_converted.safetensors'
+    save_file(new_dict, new_lora_name, metadata={"format": "pt"})
+    save_file(weights, file_name, metadata={"format": "pt"})
+
+    print(f'Save "{file_name}" and "{new_lora_name}"')
+
+
 @torch.no_grad()
 def img2latent(img_path: str, vae: AutoencoderKL, max_img_size: int = 256):
     img_pil = Image.open(img_path).convert('RGB')
@@ -137,7 +197,8 @@ def img2latent(img_path: str, vae: AutoencoderKL, max_img_size: int = 256):
         scale_factor = 1
     w, h = img_pil.size
     img_pil = img_pil.resize((int(w * scale_factor), int(h * scale_factor)))
-    logging.info(f'Resize image to {img_pil.size}, scale factor is {scale_factor}.')
+    logging.info(
+        f'Resize image to {img_pil.size}, scale factor is {scale_factor}.')
 
     img = np.array(Image.open(img_path).convert('RGB'))
     img_ten = torch.from_numpy(img).unsqueeze(0).permute(0, 3, 1, 2)
@@ -152,8 +213,7 @@ def img2latent(img_path: str, vae: AutoencoderKL, max_img_size: int = 256):
 @torch.no_grad()
 def latent2image(latents, vae: AutoencoderKL, return_type='np'):
     # latents = 1 / 0.18215 * latents.detach()
-    latents = 1 / vae.config['scaling_factor'] * latents.detach(
-    )
+    latents = 1 / vae.config['scaling_factor'] * latents.detach()
     image = vae.decode(latents, return_dict=False)[0]
     if return_type == 'np':
         image = (image / 2 + 0.5).clamp(0, 1)
@@ -177,17 +237,25 @@ def text2embedding(prompt: str, pipeline: Union[AnimationPipeline,
     else:
         tokenizer = pipeline.tokenizer
         text_encoder = pipeline.text_encoder
-        max_length = tokenizer.model_max_length
-        input_ids = tokenizer(prompt,
-                              truncation=True,
-                              padding="max_length",
-                              max_length=max_length,
-                              return_tensors="pt")
-        prompt_embeds = text_encoder(input_ids.to(text_encoder.device),
-                                     attention_mask=None)
-        prompt_embeds = prompt_embeds[0]
+        vae = pipeline.vae
+        unet = pipeline.unet
+        scheduler = pipeline.scheduler
 
-        raise NotImplementedError('Only support AnimationPipeline.')
+        # create a pseudo ad pipeline for encoder prompt
+        ad_pipeline = AnimationPipeline(vae=vae,
+                                        text_encoder=text_encoder,
+                                        tokenizer=tokenizer,
+                                        unet=unet,
+                                        scheduler=scheduler,
+                                        feature_extractor=None,
+                                        controlnet_map=None)
+        prompt_embeds = ad_pipeline._encode_prompt(
+            [prompt],
+            pipeline.device,
+            1,
+            do_classifier_free_guidance=False,
+            clip_skip=config.clip_skip)
+        del ad_pipeline
 
     return prompt_embeds
 
@@ -290,6 +358,8 @@ def run_visualize_and_save(unet: Union[UNet3DConditionModel,
         save_video(result, Path(img_save_prefix + '.gif'))
         logging.info(f'Image saved to {img_save_prefix + ".gif"}')
     else:
+        vae_dtype = vae.dtype
+        vae = vae.half()
         pipeline = StableDiffusionPipeline(vae=vae,
                                            text_encoder=text_encoder,
                                            tokenizer=tokenizer,
@@ -298,13 +368,16 @@ def run_visualize_and_save(unet: Union[UNet3DConditionModel,
                                            safety_checker=None,
                                            feature_extractor=None,
                                            requires_safety_checker=False)
-        result = pipeline(
-            prompt,
-            height,
-            width,
-            config.steps,
-            config.guidance_scale,
-        )
+        # NOTE: this pipeline do not support clip-skip
+        result = pipeline(prompt,
+                          height,
+                          width,
+                          config.steps,
+                          config.guidance_scale,
+                          negative_prompt=config.n_prompt[0])['images'][0]
+        result.save(img_save_prefix + '.png')
+        vae = vae.to(dtype=vae_dtype)
+        logging.info(f'Image saved to {img_save_prefix + ".png"}')
 
     unet = unet.to(dtype=unet_dtype)
 
@@ -314,6 +387,7 @@ def run_visualize_and_save(unet: Union[UNet3DConditionModel,
         save_directory=lora_save_path,
         unet_lora_layers=unet_lora_layers,
         text_encoder_lora_layers=None,
+        save_function=convert_and_save,
     )
     logging.info(f'Save LoRA to {lora_save_path}')
 
@@ -369,12 +443,17 @@ def train_lora(unet: Union[UNet3DConditionModel,
                                                       1)
         logging.info(
             f'Train LoRA with motion module. n_frames: {args.n_frames}')
+    else:
+        vae = vae.to(unet.device, unet.dtype)
+        logging.info('Train LoRA without motion module. '
+                     f'Convert VAE to {unet.device} and {unet.dtype}.')
 
     h, w = model_input.shape[-2:]
     h, w = h * 8, w * 8
 
     # 3. loop
-    for idx in tqdm(range(args.max_steps)):
+    pbar = tqdm(range(args.max_steps))
+    for idx in pbar:
         if (idx + 1) % args.save_interval == 0 or idx == 0:
             # NOTE: do vis and save
             img_vis_prefix = osp.join(img_vis_dir, f'vis_{idx+1}')
@@ -418,7 +497,7 @@ def train_lora(unet: Union[UNet3DConditionModel,
             target = target[:, 0]
 
         loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
-        print(loss.item())
+        pbar.set_description(f'Loss: {loss.item():.4f}')
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
