@@ -15,7 +15,7 @@ from controlnet_aux.util import HWC3, ade_palette
 from controlnet_aux.util import resize_image as aux_resize_image
 from diffusers import (AutoencoderKL, ControlNetModel, DiffusionPipeline,
                        StableDiffusionControlNetImg2ImgPipeline,
-                       StableDiffusionPipeline)
+                       StableDiffusionPipeline, UNet2DConditionModel)
 from PIL import Image
 from tqdm.rich import tqdm
 from transformers import (AutoImageProcessor, CLIPImageProcessor,
@@ -255,10 +255,13 @@ def create_pipeline(
     infer_config: InferenceConfig = ...,
     use_xformers: bool = True,
     is_hires: bool = False,
-) -> AnimationPipeline:
+    is_2d: bool = False,
+) -> Union[AnimationPipeline, StableDiffusionPipeline]:
     """Create an AnimationPipeline from a pretrained model.
     Uses the base_model argument to load or download the pretrained reference pipeline model."""
 
+    assert not (is_hires and is_2d), (
+        '"is_hires" and "is_2d" cannot be True at the same time.')
     # make sure motion_module is a Path and exists
     logger.info("Checking motion module...")
     motion_module = data_dir.joinpath(model_config.motion_module)
@@ -281,12 +284,20 @@ def create_pipeline(
     logger.info("Loading VAE...")
     vae: AutoencoderKL = AutoencoderKL.from_pretrained(base_model, subfolder="vae")
     logger.info("Loading UNet...")
-    unet: UNet3DConditionModel = UNet3DConditionModel.from_pretrained_2d(
-        pretrained_model_path=base_model,
-        motion_module_path=motion_module,
-        subfolder="unet",
-        unet_additional_kwargs=infer_config.unet_additional_kwargs,
-    )
+    if not is_2d:
+        unet: UNet3DConditionModel = UNet3DConditionModel.from_pretrained_2d(
+            pretrained_model_path=base_model,
+            motion_module_path=motion_module,
+            subfolder="unet",
+            unet_additional_kwargs=infer_config.unet_additional_kwargs,
+        )
+    else:
+        unet: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(
+            pretrained_model_name_or_path=base_model,
+            motion_module_path=motion_module,
+            subfolder="unet",
+            unet_additional_kwargs=infer_config.unet_additional_kwargs,
+        )
     feature_extractor = CLIPImageProcessor.from_pretrained(base_model, subfolder="feature_extractor")
 
     # set up scheduler
@@ -372,6 +383,16 @@ def create_pipeline(
             scheduler=scheduler,
             feature_extractor=feature_extractor,
             controlnet_map=None,
+        )
+    elif is_2d:
+        pipeline = StableDiffusionPipeline(
+            vae=vae,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            unet=unet,
+            scheduler=scheduler,
+            feature_extractor=feature_extractor,
+            requires_safety_checker=False,
         )
     else:
         pipeline = AnimationPipeline(
