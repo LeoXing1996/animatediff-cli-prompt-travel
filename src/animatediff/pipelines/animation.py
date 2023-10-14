@@ -2186,7 +2186,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
 
         if is_i2v and input_img.exists():
             self.enable_i2v = True
-            strength = 0.6  # fix as 0.85
+            strength = 0.85  # fix as 0.85
             total_timesteps = int(num_inference_steps / strength)
             self.i2v_scheduler = self.build_i2v_scheduler(num_inference_steps, strength)
             logger.info(f'Run Img2Vid mode, strength is {strength}. '
