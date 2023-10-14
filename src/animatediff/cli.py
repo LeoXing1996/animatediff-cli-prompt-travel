@@ -296,6 +296,9 @@ def generate(
         logger.info('Image is passed. Run Image-to-Video!')
         logger.info(f'Image path: {input_image.absolute()}.')
         is_i2v = True
+        orig_scheduler = model_config.scheduler
+        model_config.scheduler = 'dpmpp_2m'
+        logger.info(f'Convert scheduler from {orig_scheduler} to dpmpp_2m.')
 
     # set sane defaults for context, overlap, and stride if not supplied
     context, overlap, stride = get_context_params(length, context, overlap, stride)
