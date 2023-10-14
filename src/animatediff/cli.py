@@ -107,7 +107,8 @@ def generate(
             "--model-path",
             "-m",
             path_type=Path,
-            help="Base model to use (path or HF repo ID). You probably don't need to change this.",
+            help=
+            "Base model to use (path or HF repo ID). You probably don't need to change this.",
         ),
     ] = Path("runwayml/stable-diffusion-v1-5"),
     config_path: Annotated[
@@ -127,8 +128,30 @@ def generate(
         typer.Option(
             "--img-path",
             path_type=Path,
-            help='If passed, will run image-to-video pipeline.')
+            help='If passed, will run image-to-video pipeline.',
+        ),
     ] = None,
+    strength: Annotated[
+        float,
+        typer.Option(
+            '--strength',
+            help='Strength for img2vid task,'
+        )
+    ] = 0.85,
+    disable_tile: Annotated[
+        bool,
+        typer.Option(
+            '--disable-tile',
+            is_flag=True,
+        ),
+    ] = False,
+    disable_ip_adapter: Annotated[
+        bool,
+        typer.Option(
+            '--disable-ip-adapter',
+            is_flag=True,
+        ),
+    ] = False,
     width: Annotated[
         int,
         typer.Option(
@@ -169,7 +192,8 @@ def generate(
             "-C",
             min=1,
             max=32,
-            help="Number of frames to condition on (default: max of <length> or 32). max for motion module v1 is 24",
+            help=
+            "Number of frames to condition on (default: max of <length> or 32). max for motion module v1 is 24",
             show_default=False,
             rich_help_panel="Generation",
         ),
@@ -212,9 +236,10 @@ def generate(
     ] = 1,
     device: Annotated[
         str,
-        typer.Option(
-            "--device", "-d", help="Device to run on (cpu, cuda, cuda:id)", rich_help_panel="Advanced"
-        ),
+        typer.Option("--device",
+                     "-d",
+                     help="Device to run on (cpu, cuda, cuda:id)",
+                     rich_help_panel="Advanced"),
     ] = "cuda",
     use_xformers: Annotated[
         bool,
@@ -246,6 +271,14 @@ def generate(
             rich_help_panel="Output",
         ),
     ] = Path("output/"),
+    save_name: Annotated[
+        Path,
+        typer.Option(
+            "--save-name",
+            help="The name for the saved model",
+            rich_help_panel="Output",
+        ),
+    ] = None,
     no_frames: Annotated[
         bool,
         typer.Option(
@@ -300,6 +333,13 @@ def generate(
         model_config.scheduler = 'dpmpp_2m'
         logger.info(f'Convert scheduler from {orig_scheduler} to dpmpp_2m.')
 
+        if disable_ip_adapter:
+            model_config.ip_adapter_map['enable'] = False
+            logger.info(f'Disable "ip_adapter" as use input!')
+        if disable_tile:
+            model_config.controlnet_map['controlnet_tile']['enable'] = False
+            logger.info(f'Disable "controlnet_tile" as use input!')
+
     # set sane defaults for context, overlap, and stride if not supplied
     context, overlap, stride = get_context_params(length, context, overlap, stride)
 
@@ -317,7 +357,10 @@ def generate(
     # get a timestamp for the output directory
     time_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     # make the output directory
-    save_dir = out_dir.joinpath(f"{time_str}-{model_config.save_name}")
+    if save_name is None:
+        save_dir = out_dir.joinpath(f"{time_str}-{model_config.save_name}")
+    else:
+        save_dir = out_dir.joinpath(save_name)
     save_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Will save outputs to ./{path_from_cwd(save_dir)}")
 
@@ -453,6 +496,7 @@ def generate(
                 output_map = model_config.output,
                 is_i2v=is_i2v,
                 input_img=input_image,
+                i2v_strength=strength,
             )
             outputs.append(output)
             torch.cuda.empty_cache()

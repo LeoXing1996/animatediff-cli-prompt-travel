@@ -843,6 +843,7 @@ def run_inference(
     output_map: Dict[str,Any] = None,
     is_i2v: bool = False,
     input_img: Optional[Path] = None,
+    i2v_strength: float = 0.85,
 ):
     out_dir = Path(out_dir)  # ensure out_dir is a Path
 
@@ -872,6 +873,7 @@ def run_inference(
         ip_adapter_map=ip_adapter_map,
         is_i2v=is_i2v,
         input_img=input_img,
+        i2v_strength=i2v_strength,
     )
 
     logger.info("Generation complete, saving...")

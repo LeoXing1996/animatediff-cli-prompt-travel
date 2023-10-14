@@ -1868,6 +1868,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         ip_adapter_map: Dict[str, Any] = None,
         is_i2v: bool = False,
         input_img: Optional[Path] = None,
+        i2v_strength: float = 0.85,
         **kwargs,
     ):
         global C_REF_MODE
@@ -2186,7 +2187,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
 
         if is_i2v and input_img.exists():
             self.enable_i2v = True
-            strength = 0.85  # fix as 0.85
+            strength = i2v_strength
             total_timesteps = int(num_inference_steps / strength)
             self.i2v_scheduler = self.build_i2v_scheduler(num_inference_steps, strength)
             logger.info(f'Run Img2Vid mode, strength is {strength}. '
