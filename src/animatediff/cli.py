@@ -593,7 +593,7 @@ def hires_upscale(
     # 1. find frames
     flag = False
     for f in os.listdir(input_dir):
-        if osp.isdir(osp.join(input_dir, f)) and 'detectmap' not in f and 'ip_adapter' not in f:
+        if osp.isdir(osp.join(input_dir, f)) and 'detectmap' not in f and 'ip_adapter' not in f and not f.startswith('.'):
             flag = True
             break
 
