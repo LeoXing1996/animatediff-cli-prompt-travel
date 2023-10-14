@@ -659,8 +659,6 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         t = torch.linspace(t_max, 0, total_steps)
 
         def t_to_sigma(t):
-            import ipdb
-            ipdb.set_trace()
             t = t.float()
             low_idx = t.floor().long()
             high_idx = t.ceil().long()
@@ -672,8 +670,6 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         sigma_selected = t_to_sigma(t)
         sigma_selected = torch.cat([sigma_selected, sigma_selected.new_zeros([1])])
         sigma_selected = sigma_selected[-(num_steps + 1):]
-        import ipdb
-        ipdb.set_trace()
         self.scheduler.set_timesteps(total_steps)
         timesteps_selected = self.scheduler.timesteps.clone()[-(num_steps + 1):]
 
