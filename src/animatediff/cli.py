@@ -122,6 +122,13 @@ def generate(
             help="Path to a prompt configuration JSON file",
         ),
     ] = Path("config/prompts/01-ToonYou.json"),
+    input_image: Annotated[
+        Path,
+        typer.Option(
+            "--img-path",
+            path_type=Path,
+            help='If passed, will run image-to-video pipeline.')
+    ] = None,
     width: Annotated[
         int,
         typer.Option(
@@ -284,6 +291,12 @@ def generate(
     is_v2 = is_v2_motion_module(model_config.motion_module)
     infer_config: InferenceConfig = get_infer_config(is_v2)
 
+    is_i2v = False
+    if input_image is not None and input_image.exists():
+        logger.info('Image is passed. Run Image-to-Video!')
+        logger.info(f'Image path: {input_image.absolute()}.')
+        is_i2v = True
+
     # set sane defaults for context, overlap, and stride if not supplied
     context, overlap, stride = get_context_params(length, context, overlap, stride)
 
@@ -305,8 +318,23 @@ def generate(
     save_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Will save outputs to ./{path_from_cwd(save_dir)}")
 
-    controlnet_image_map, controlnet_type_map, controlnet_ref_map = controlnet_preprocess(model_config.controlnet_map, width, height, length, save_dir, device)
-    ip_adapter_map = ip_adapter_preprocess(model_config.ip_adapter_map, width, height, length, save_dir)
+    controlnet_image_map, controlnet_type_map, controlnet_ref_map = controlnet_preprocess(
+        model_config.controlnet_map,
+        width,
+        height,
+        length,
+        save_dir,
+        device,
+        is_i2v,
+        input_image)
+    ip_adapter_map = ip_adapter_preprocess(
+        model_config.ip_adapter_map,
+        width,
+        height,
+        length,
+        save_dir,
+        is_i2v,
+        input_image)
 
     # beware the pipeline
     global g_pipeline
@@ -420,6 +448,8 @@ def generate(
                 no_frames=no_frames,
                 ip_adapter_map=ip_adapter_map,
                 output_map = model_config.output,
+                is_i2v=is_i2v,
+                input_img=input_image,
             )
             outputs.append(output)
             torch.cuda.empty_cache()

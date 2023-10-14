@@ -5,6 +5,7 @@ import itertools
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -609,6 +610,8 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         device,
         generator,
         latents=None,
+        is_i2v=False,
+        input_img: Path = None,
     ):
         shape = (
             batch_size,
@@ -628,10 +631,118 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         else:
             latents = latents
 
+        if is_i2v and input_img.exists():
+            from PIL import Image
+            img_ten = self.image_processor.preprocess(
+                Image.open(input_img).convert('RGB'),
+                height=height,
+                width=width).to(self.vae.device, self.vae.dtype)
+            latents = self.vae.encode(img_ten).latent_dist.sample(
+                generator=generator)
+            latents = latents * self.vae.config.scaling_factor
+            latents = latents.unsqueeze(2).repeat(batch_size, 1, video_length, 1, 1)
+            latents = self.i2v_scheduler.prepare_latent(latents)
+            return latents.to(device, dtype)
+
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
         return latents.to(device, dtype)
 
+    def build_i2v_scheduler(self, num_steps, strength):
+
+        total_steps = int(num_steps / strength)
+        self.scheduler.set_timesteps(1000)
+        sigmas = self.scheduler.sigmas
+        log_sigmas = sigmas.log()
+
+        t_max = len(sigmas) - 1
+        t = torch.linspace(t_max, 0, total_steps)
+
+        def t_to_sigma(t):
+            import ipdb
+            ipdb.set_trace()
+            t = t.float()
+            low_idx = t.floor().long()
+            high_idx = t.ceil().long()
+            w = t-low_idx if t.device.type == 'mps' else t.frac()
+            log_sigma = (1 - w) * log_sigmas[low_idx] + w * log_sigmas[high_idx]
+            return log_sigma.exp()
+
+        # build sigma
+        sigma_selected = t_to_sigma(t)
+        sigma_selected = torch.cat([sigma_selected, sigma_selected.new_zeros([1])])
+        sigma_selected = sigma_selected[-(num_steps + 1):]
+        import ipdb
+        ipdb.set_trace()
+        self.scheduler.set_timesteps(total_steps)
+        timesteps_selected = self.scheduler.timesteps.clone()[-(num_steps + 1):]
+
+        class comfyUIScheduler():
+            def __init__(self, sigmas, log_sigma, timesteps):
+                self.sigmas = sigmas
+                self.log_sigmas = log_sigma
+                self.timesteps = timesteps
+
+                self.old_denoised = None
+
+            def t_to_idx(self, t):
+                """Get the index corresponding to input t."""
+                return torch.nonzero(self.timesteps == t)[0].item()
+
+            def scale_model_input(self, sample, t):
+                """this is similar to diffusers.EulerDiscreteScheduler
+                """
+                idx = self.t_to_idx(t)
+                sigma = self.sigmas[idx]
+                scale = 1 / (sigma ** 2 + 1) ** 0.5
+                return sample * scale.item()
+
+            def prepare_latent(self, latent):
+                """prepare latent for img2vid task.
+                """
+                return latent + torch.randn_like(latent) * self.sigmas[0]
+
+            def sigma_to_t(self, sigma):
+                log_sigma = sigma.log()
+                dists = log_sigma.to(self.log_sigmas.device) - self.log_sigmas[:, None]
+                return dists.abs().argmin(dim=0).view(sigma.shape)
+
+            def prepare_t(self, timestep):
+                idx = self.t_to_idx(timestep)
+                sigma = self.sigmas[idx]
+                t = self.sigma_to_t(sigma)
+                return t
+
+            def step(self, model_output, timestep, sample, *args, **kwargs):
+
+                idx = self.t_to_idx(timestep)
+                sigma = self.sigmas[idx]
+
+                denoised = sample - model_output * sigma
+
+                sigma_fn = lambda t: t.neg().exp()
+                t_fn = lambda sigma: sigma.log().neg()
+
+                t, t_next = t_fn(self.sigmas[idx]), t_fn(self.sigmas[idx + 1])
+                h = t_next - t
+                if self.old_denoised is None or self.sigmas[idx + 1] == 0:
+                    output = (sigma_fn(t_next) / sigma_fn(t)) * sample - (-h).expm1() * denoised
+
+                else:
+                    h_last = t - t_fn(self.sigmas[idx - 1])
+                    r = h_last / h
+                    denoised_d = (1 + 1 / (2 * r)) * denoised - (1 / (2 * r)) * self.old_denoised
+                    output = (sigma_fn(t_next) / sigma_fn(t)) * sample - (-h).expm1() * denoised_d
+
+                self.old_denoised = denoised
+                print(f't: {timestep}, idx: {idx} sigma: {sigma.item()}')
+                return [output.to(model_output.device, model_output.dtype)]
+
+        scheduler = comfyUIScheduler(
+            sigma_selected.to(self.device),
+            log_sigmas.to(self.device),
+            timesteps_selected.to(self.device))
+        return scheduler
 
     # from diffusers/examples/community/stable_diffusion_controlnet_reference.py
     def prepare_ref_latents(self, refimage, batch_size, dtype, device, generator, do_classifier_free_guidance):
@@ -1759,6 +1870,8 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         controlnet_max_models_on_vram: int=99,
         controlnet_is_loop: bool=True,
         ip_adapter_map: Dict[str, Any] = None,
+        is_i2v: bool = False,
+        input_img: Optional[Path] = None,
         **kwargs,
     ):
         global C_REF_MODE
@@ -2071,8 +2184,21 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             )
 
         # 4. Prepare timesteps
+
         self.scheduler.set_timesteps(num_inference_steps, device=latents_device)
         timesteps = self.scheduler.timesteps
+
+        if is_i2v and input_img.exists():
+            self.enable_i2v = True
+            strength = 0.6  # fix as 0.85
+            total_timesteps = int(num_inference_steps / strength)
+            self.i2v_scheduler = self.build_i2v_scheduler(num_inference_steps, strength)
+            logger.info(f'Run Img2Vid mode, strength is {strength}. '
+                        f'Total step is {total_timesteps}.')
+            timesteps = self.i2v_scheduler.timesteps[:-1]
+            logger.info(f'Denoising timesteps: {timesteps}')
+        else:
+            self.enable_i2v = False
 
         # 5. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
@@ -2086,6 +2212,8 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             latents_device,  # keep latents on cpu for sequential mode
             generator,
             latents,
+            is_i2v,
+            input_img,
         )
 
         # 5.9. Prepare reference latent variables
@@ -2273,12 +2401,15 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                                 .to(device)
                                 .repeat(2 if do_classifier_free_guidance else 1, 1, 1, 1, 1)
                             )
-                            control_model_input = self.scheduler.scale_model_input(latent_model_input, t)[:, :, 0]
+                            if self.enable_i2v:
+                                control_model_input = self.i2v_scheduler.scale_model_input(latent_model_input, t)[:, :, 0]
+                            else:
+                                control_model_input = self.scheduler.scale_model_input(latent_model_input, t)[:, :, 0]
                             controlnet_prompt_embeds = get_current_prompt_embeds([frame_no], latents.shape[2])
 
                             down_samples, mid_sample = self.controlnet_map[type_str](
                                 control_model_input,
-                                t,
+                                t if not self.enable_i2v else self.i2v_scheduler.prepare_t(t),
                                 encoder_hidden_states=controlnet_prompt_embeds,
                                 controlnet_cond=cont_var["image"],
                                 conditioning_scale=cont_var["cond_scale"],
@@ -2321,7 +2452,10 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                         .to(device)
                         .repeat(2 if do_classifier_free_guidance else 1, 1, 1, 1, 1)
                     )
-                    latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                    if self.enable_i2v:
+                        latent_model_input = self.i2v_scheduler.scale_model_input(latent_model_input, t)
+                    else:
+                        latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                     cur_prompt = get_current_prompt_embeds(context, latents.shape[2])
 
@@ -2340,14 +2474,17 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                                 1,
                             ),
                         )
-                        ref_xt = self.scheduler.scale_model_input(ref_xt, t)
+                        if self.enable_i2v:
+                            ref_xt = self.i2v_scheduler.scale_model_input(ref_xt, t)
+                        else:
+                            ref_xt = self.scheduler.scale_model_input(ref_xt, t)
 
                         stopwatch_record("C_REF_MODE write start")
 
                         C_REF_MODE = "write"
                         self.unet(
                             ref_xt,
-                            t,
+                            t if not self.enable_i2v else self.i2v_scheduler.prepare_t(t),
                             encoder_hidden_states=cur_prompt,
                             cross_attention_kwargs=cross_attention_kwargs,
                             return_dict=False,
@@ -2362,7 +2499,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                     stopwatch_record("normal unet start")
                     pred = self.unet(
                         latent_model_input.to(self.unet.device, self.unet.dtype),
-                        t,
+                        t if not self.enable_i2v else self.i2v_scheduler.prepare_t(t),
                         encoder_hidden_states=cur_prompt,
                         cross_attention_kwargs=cross_attention_kwargs,
                         down_block_additional_residuals=down_block_res_samples,
@@ -2383,13 +2520,22 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(
-                    model_output=noise_pred,
-                    timestep=t,
-                    sample=latents.to(latents_device),
-                    **extra_step_kwargs,
-                    return_dict=False,
-                )[0]
+                if self.enable_i2v:
+                    latents = self.i2v_scheduler.step(
+                        model_output=noise_pred,
+                        timestep=t,
+                        sample=latents.to(latents_device),
+                        **extra_step_kwargs,
+                        return_dict=False,
+                    )[0]
+                else:
+                    latents = self.scheduler.step(
+                        model_output=noise_pred,
+                        timestep=t,
+                        sample=latents.to(latents_device),
+                        **extra_step_kwargs,
+                        return_dict=False,
+                    )[0]
 
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or (

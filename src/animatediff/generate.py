@@ -4,7 +4,7 @@ import os
 import re
 from os import PathLike
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Union, Optional
 
 import numpy as np
 import torch
@@ -391,6 +391,7 @@ def create_pipeline(
             tokenizer=tokenizer,
             unet=unet,
             scheduler=scheduler,
+            safety_checker=None,
             feature_extractor=feature_extractor,
             requires_safety_checker=False,
         )
@@ -646,6 +647,8 @@ def controlnet_preprocess(
         duration: int = 16,
         out_dir: PathLike = ...,
         device_str:str=None,
+        is_i2v: bool = False,
+        input_img: Optional[Path] = None,
         ):
 
     if not controlnet_map:
@@ -667,6 +670,21 @@ def controlnet_preprocess(
     for c in controlnet_map:
         if c == "controlnet_ref":
             continue
+
+        # NOTE: prepare tile control for img2vid
+        if c == 'controlnet_tile' and is_i2v and input_img is not None:
+            img_dir = c_image_dir.joinpath(c)
+
+            cond_imgs = sorted(glob.glob( os.path.join(img_dir, "[0-9]*.png"), recursive=False))
+            if len(cond_imgs) == 0:
+                os.makedirs(img_dir, exist_ok=True)
+                c_img = os.path.join(img_dir, '0.png')
+                Image.open(input_img.absolute()).save(c_img)
+                logger.info('No controlnet_tile is passed. Copy input image to controlnet_tile directory '
+                            f'("{c_img}").')
+            else:
+                logger.info('controlent_tile is passed for img2vid mode. '
+                            'Use existed images for controlnet_tile.')
 
         item = controlnet_map[c]
 
@@ -747,6 +765,8 @@ def ip_adapter_preprocess(
         height: int = 512,
         duration: int = 16,
         out_dir: PathLike = ...,
+        is_i2v: bool = False,
+        input_img: Optional[Path] = None,
         ):
 
     ip_adapter_map={}
@@ -758,6 +778,19 @@ def ip_adapter_preprocess(
             resized_to_square = ip_adapter_config_map["resized_to_square"] if "resized_to_square" in ip_adapter_config_map else False
             image_dir = data_dir.joinpath( ip_adapter_config_map["input_image_dir"] )
             imgs = sorted(glob.glob( os.path.join(image_dir, "[0-9]*.png"), recursive=False))
+
+            if is_i2v and input_img is not None:
+                if len(imgs) == 0:
+                    os.makedirs(image_dir, exist_ok=True)
+                    ip_img = os.path.join(image_dir, '0.png')
+                    Image.open(input_img.absolute()).save(ip_img)
+                    logger.info('No ip_adapter is passed. Copy input image to ip_adapter directory '
+                                f'("{ip_img}").')
+                    imgs = [ip_img]
+                else:
+                    logger.info('ip_adapter is passed for img2vid mode. '
+                                'Use existed images for ip_adapter.')
+
             if len(imgs) > 0:
                 prepare_ip_adapter()
                 ip_adapter_map["scale"] = ip_adapter_config_map["scale"]
@@ -808,6 +841,8 @@ def run_inference(
     no_frames :bool = False,
     ip_adapter_map: Dict[str,Any] = None,
     output_map: Dict[str,Any] = None,
+    is_i2v: bool = False,
+    input_img: Optional[Path] = None,
 ):
     out_dir = Path(out_dir)  # ensure out_dir is a Path
 
@@ -835,6 +870,8 @@ def run_inference(
         controlnet_max_models_on_vram=controlnet_map["max_models_on_vram"] if "max_models_on_vram" in controlnet_map else 99,
         controlnet_is_loop = controlnet_map["is_loop"] if "is_loop" in controlnet_map else True,
         ip_adapter_map=ip_adapter_map,
+        is_i2v=is_i2v,
+        input_img=input_img,
     )
 
     logger.info("Generation complete, saving...")

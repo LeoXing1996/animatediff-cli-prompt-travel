@@ -1,6 +1,8 @@
 import logging
 from enum import Enum
 
+from diffusers.configuration_utils import ConfigMixin
+from diffusers.schedulers.scheduling_utils import SchedulerMixin
 from diffusers.schedulers import (
     DDIMScheduler,
     DPMSolverMultistepScheduler,
@@ -44,6 +46,8 @@ class DiffusionScheduler(str, Enum):
 
     dpmpp_2m_sde = "dpmpp_2m_sde"  # DPM++ 2M SDE
     k_dpmpp_2m_sde = "k_dpmpp_2m_sde"  # DPM++ 2M SDE Karras
+
+    comfyUI_dpmpp_2m = 'comfyUI'
 
 
 def get_scheduler(name: str, config: dict = {}):
