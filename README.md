@@ -6,6 +6,39 @@ I added a experimental feature to animatediff-cli to change the prompt in the mi
 
 It seems to work surprisingly well!
 
+## New README about Leo's Travel!
+
+### 1. img2vid
+
+Run img2vid with `scripts/img2vid.py`
+
+```shell
+python scripts/img2vid.py --img IMG
+    --base-cfg CONFIG 
+    --save-name SAVE_NAME
+```
+
+Then you will see a new config under `config/img2vid` folder and a new generated result under `img2vid` folder.
+
+The above command is same as 
+```shell
+animatediff generate -c NEW_CONFIG 
+    -H 512 -W 512 -L 16 -C 16 
+    --img-path IMG --strength 0.85 
+    --save-name SAVE_NAME --out-dir img2vid
+```
+
+### 2. train lora with motion-module (but not work, so sad)
+
+```shell
+python scripts/train_single_image_lora.py 
+    --config CONFIG 
+    --img-path IMG 
+    --save-interval INTERVAL
+    --save-dir LORA_PATH 
+    --disable-half  # disable fp16 training for lora
+```
+
 ### Example
 - [A command to automate video stylization has been added](https://github.com/s9roll7/animatediff-cli-prompt-travel#video-stylization).
 - Original / First generation result / Second generation(for upscaling) result
