@@ -49,7 +49,7 @@ def main():
     img_open = Image.open(args.img)
 
     save_name = args.save_name
-    work_dir = osp.join('output', args.work_dir)
+    work_dir = osp.join(args.work_dir)
 
     base_cfg_path = Path(args.base_cfg)
     base_cfg: ModelConfig = get_model_config(base_cfg_path)
