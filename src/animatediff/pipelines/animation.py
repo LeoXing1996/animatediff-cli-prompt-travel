@@ -4,8 +4,8 @@ import inspect
 import itertools
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -646,6 +646,25 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
 
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
+
+        # >>> prepare latent --> add consistent noise over the latent
+        # noise = torch.randn(shape).to(device)
+        # cond_latent = latents[:, :, 0, :, :].clone()
+        # for f in range(video_length):
+        #     latents[:, :, f, :, :] = cond_latent * 0.1 + noise[:, :, f, :, :]
+
+        # generator = torch.Generator()
+        # generator.manual_seed(23333)
+
+        # alpha = 0.1
+        # static_noise = torch.randn(
+        #     batch_size,
+        #     num_channels_latents,
+        #     height // self.vae_scale_factor,
+        #     width // self.vae_scale_factor)[:, :, None, ...].repeat(1, 1, video_length, 1, 1)
+        # random_noise = torch.randn(*shape, generator=generator)
+        # latents = static_noise * alpha + random_noise
+
         return latents.to(device, dtype)
 
     def build_i2v_scheduler(self, num_steps, strength):
