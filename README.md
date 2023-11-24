@@ -28,6 +28,15 @@ animatediff generate -c NEW_CONFIG
     --save-name SAVE_NAME --out-dir img2vid
 ```
 
+If you want to use PIA as your base animator, please modify your config based on `config/prompt/pia-base.json`, and set `--disable-tile` in command line args.
+
+```shell
+python scripts/img2vid.py --base-cfg config/prompts/pia-base.json -H 256 -W 256
+    --ip-adapter-weight 0.3 --tile-weight 0.1 --img webvid/webvid/frame/47605.png
+    --save-name 47605 --work-dir webvid-tile-0.0-noft/47605
+    --prompt "Robot dancing in times square." --n-prompt "worst quality, lowres" --disable-tile
+```
+
 ### 2. train lora with motion-module (but not work, so sad)
 
 ```shell
