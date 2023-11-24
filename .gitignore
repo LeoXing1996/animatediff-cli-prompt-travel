@@ -237,3 +237,6 @@ src/animatediff/_version.py
 # envrc
 .env*
 !.envrc.example
+
+pia-case/
+webvid-*/*

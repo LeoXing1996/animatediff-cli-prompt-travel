@@ -26,6 +26,10 @@ def get_args():
 
     parser.add_argument('-H', default=512)
     parser.add_argument('-W', default=512)
+    parser.add_argument('--prompt', type=str)
+    parser.add_argument('--n-prompt', type=str)
+
+    parser.add_argument('--repeats', type=int, default=1)
 
     parser.add_argument('--tile-weight', type=float, default=0.1)
     parser.add_argument('--disable-tile', action='store_true')
@@ -33,9 +37,10 @@ def get_args():
     parser.add_argument('--ip-adapter-weight', type=float, default=0.3)
     parser.add_argument('--disable-ip-adapter', action='store_true')
 
+    parser.add_argument('--construct-latent', action='store_true')
     parser.add_argument('--strength', type=float, default=0.85)
 
-    parser.add_argument('--save-name', type=str, help='save name for both config file and output video')
+    parser.add_argument('--save-name', type=str, default='', help='save name for both config file and output video')
 
     parser.add_argument('--work-dir', default='img2vid')
 
@@ -55,6 +60,12 @@ def main():
     base_cfg: ModelConfig = get_model_config(base_cfg_path)
 
     base_cfg.name = base_cfg.name + '_img2vid'
+
+    if args.prompt is not None:
+        base_cfg.head_prompt = args.prompt
+
+    if args.n_prompt is not None:
+        base_cfg.n_prompt = [args.n_prompt]
 
     enable_ip_adapter = not args.disable_ip_adapter
     ip_adapter_weight = args.ip_adapter_weight
@@ -78,9 +89,11 @@ def main():
     cfg_save_dir.write_text(base_cfg.json(indent=4), encoding='utf-8')
 
     img2vid_cmd = (f'animatediff generate -c {cfg_save_dir.absolute()}'
-                   f' -H {args.H} -W {args.W} -L 16 -C 16 '
+                   f' -H {args.H} -W {args.W} -L 16 -C 16 --repeats {args.repeats}'
                    f' --img-path {args.img} --strength {strength} '
                    f' --save-name {save_name} --out-dir {work_dir}')
+    if args.construct_latent:
+        img2vid_cmd += ' --construct-latent'
     print('img2vid cmd:')
     print(img2vid_cmd)
     os.system(img2vid_cmd)

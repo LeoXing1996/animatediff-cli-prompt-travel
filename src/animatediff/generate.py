@@ -309,32 +309,41 @@ def create_pipeline(
     if model_config.path is not None and model_config.path != "":
         model_path = data_dir.joinpath(model_config.path)
         logger.info(f"Loading weights from {model_path}")
-        if model_path.is_file():
-            logger.debug("Loading from single checkpoint file")
-            unet_state_dict, tenc_state_dict, vae_state_dict = get_checkpoint_weights(model_path)
-        elif model_path.is_dir():
-            logger.debug("Loading from Diffusers model directory")
-            temp_pipeline = StableDiffusionPipeline.from_pretrained(model_path)
-            unet_state_dict, tenc_state_dict, vae_state_dict = (
-                temp_pipeline.unet.state_dict(),
-                temp_pipeline.text_encoder.state_dict(),
-                temp_pipeline.vae.state_dict(),
-            )
-            del temp_pipeline
-        else:
-            raise FileNotFoundError(f"model_path {model_path} is not a file or directory")
+        try:
+            if model_path.is_file():
+                logger.debug("Loading from single checkpoint file")
+                unet_state_dict, tenc_state_dict, vae_state_dict = get_checkpoint_weights(model_path)
+            elif model_path.is_dir():
+                logger.debug("Loading from Diffusers model directory")
+                temp_pipeline = StableDiffusionPipeline.from_pretrained(model_path)
+                unet_state_dict, tenc_state_dict, vae_state_dict = (
+                    temp_pipeline.unet.state_dict(),
+                    temp_pipeline.text_encoder.state_dict(),
+                    temp_pipeline.vae.state_dict(),
+                )
+                del temp_pipeline
+            else:
+                raise FileNotFoundError(f"model_path {model_path} is not a file or directory")
+        except KeyError:
+            logger.info('Seems your input a 3D unet ckpt. Load it as 3D.')
+            unet_state_dict = torch.load(model_path)
+            tenc_state_dict = None
+            vae_state_dict = None
+            logger.info('Load 3D unet successfully!')
 
         # Load into the unet, TE, and VAE
         logger.info("Merging weights into UNet...")
         _, unet_unex = unet.load_state_dict(unet_state_dict, strict=False)
         if len(unet_unex) > 0:
             raise ValueError(f"UNet has unexpected keys: {unet_unex}")
-        tenc_missing, _ = text_encoder.load_state_dict(tenc_state_dict, strict=False)
-        if len(tenc_missing) > 0:
-            raise ValueError(f"TextEncoder has missing keys: {tenc_missing}")
-        vae_missing, _ = vae.load_state_dict(vae_state_dict, strict=False)
-        if len(vae_missing) > 0:
-            raise ValueError(f"VAE has missing keys: {vae_missing}")
+        if tenc_state_dict is not None:
+            tenc_missing, _ = text_encoder.load_state_dict(tenc_state_dict, strict=False)
+            if len(tenc_missing) > 0:
+                raise ValueError(f"TextEncoder has missing keys: {tenc_missing}")
+        if vae_state_dict is not None:
+            vae_missing, _ = vae.load_state_dict(vae_state_dict, strict=False)
+            if len(vae_missing) > 0:
+                raise ValueError(f"VAE has missing keys: {vae_missing}")
     else:
         logger.info("Using base model weights (no checkpoint/LoRA)")
 
@@ -841,7 +850,7 @@ def run_inference(
     no_frames :bool = False,
     ip_adapter_map: Dict[str,Any] = None,
     output_map: Dict[str,Any] = None,
-    is_i2v: bool = False,
+    construct_latent_for_i2v: bool = False,
     input_img: Optional[Path] = None,
     i2v_strength: float = 0.85,
 ):
@@ -871,7 +880,7 @@ def run_inference(
         controlnet_max_models_on_vram=controlnet_map["max_models_on_vram"] if "max_models_on_vram" in controlnet_map else 99,
         controlnet_is_loop = controlnet_map["is_loop"] if "is_loop" in controlnet_map else True,
         ip_adapter_map=ip_adapter_map,
-        is_i2v=is_i2v,
+        construct_latent_for_i2v=construct_latent_for_i2v,
         input_img=input_img,
         i2v_strength=i2v_strength,
     )

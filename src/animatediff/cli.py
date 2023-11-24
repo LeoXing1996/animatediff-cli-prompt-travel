@@ -135,7 +135,7 @@ def generate(
         float,
         typer.Option(
             '--strength',
-            help='Strength for img2vid task,'
+            help='Strength for img2vid task, only work when construct_latent_for_i2v is passed.'
         )
     ] = 0.85,
     disable_tile: Annotated[
@@ -299,6 +299,15 @@ def generate(
             rich_help_panel="Output",
         ),
     ] = False,
+    construct_latent_for_i2v: Annotated[
+        bool,
+        typer.Option(
+            "--construct-latent",
+            is_flag=True,
+            help="Whether constuct the init latent for img2vid task",
+            rich_help_panel="Output",
+        ),
+    ] = False,
     version: Annotated[
         Optional[bool],
         typer.Option(
@@ -329,9 +338,10 @@ def generate(
         logger.info('Image is passed. Run Image-to-Video!')
         logger.info(f'Image path: {input_image.absolute()}.')
         is_i2v = True
-        orig_scheduler = model_config.scheduler
-        model_config.scheduler = 'dpmpp_2m'
-        logger.info(f'Convert scheduler from {orig_scheduler} to dpmpp_2m.')
+        if construct_latent_for_i2v:
+            orig_scheduler = model_config.scheduler
+            model_config.scheduler = 'dpmpp_2m'
+            logger.info(f'Convert scheduler from {orig_scheduler} to dpmpp_2m.')
 
         if disable_ip_adapter:
             model_config.ip_adapter_map['enable'] = False
@@ -494,7 +504,7 @@ def generate(
                 no_frames=no_frames,
                 ip_adapter_map=ip_adapter_map,
                 output_map = model_config.output,
-                is_i2v=is_i2v,
+                construct_latent_for_i2v=construct_latent_for_i2v,
                 input_img=input_image,
                 i2v_strength=strength,
             )

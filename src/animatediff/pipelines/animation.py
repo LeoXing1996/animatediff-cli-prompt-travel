@@ -1885,7 +1885,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         controlnet_max_models_on_vram: int=99,
         controlnet_is_loop: bool=True,
         ip_adapter_map: Dict[str, Any] = None,
-        is_i2v: bool = False,
+        construct_latent_for_i2v: bool = False,
         input_img: Optional[Path] = None,
         i2v_strength: float = 0.85,
         **kwargs,
@@ -2204,7 +2204,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         self.scheduler.set_timesteps(num_inference_steps, device=latents_device)
         timesteps = self.scheduler.timesteps
 
-        if is_i2v and input_img.exists():
+        if construct_latent_for_i2v and input_img.exists():
             self.enable_i2v = True
             strength = i2v_strength
             total_timesteps = int(num_inference_steps / strength)
@@ -2228,7 +2228,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             latents_device,  # keep latents on cpu for sequential mode
             generator,
             latents,
-            is_i2v,
+            construct_latent_for_i2v,
             input_img,
         )
 
