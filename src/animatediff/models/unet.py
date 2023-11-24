@@ -1,9 +1,10 @@
 # Adapted from https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/unet_2d_condition.py
 
+from copy import deepcopy
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import torch
 import torch.utils.checkpoint
@@ -511,6 +512,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         motion_module_path: PathLike,
         subfolder: Optional[str] = None,
         unet_additional_kwargs: Optional[dict] = None,
+        is_pia: bool = False,
     ):
         pretrained_model_path = Path(pretrained_model_path)
         motion_module_path = Path(motion_module_path)
@@ -567,8 +569,25 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         else:
             raise FileNotFoundError(f"no motion module weights found in {motion_module_path}")
 
-        # merge the state dicts
-        state_dict.update(motion_state_dict)
+        if is_pia:
+            # 1. convert conv_in from 4 -> 9
+            conv_in_weight = model.conv_in.weight
+            conv_in_weight_shape = list(conv_in_weight.shape)
+            conv_in_weight_pia_shape = deepcopy(conv_in_weight_shape)
+            conv_in_weight_pia_shape[1] = 9
+            conv_in_weight_new = torch.zeros(*conv_in_weight_pia_shape)
+            model.conv_in.weight = torch.nn.Parameter(conv_in_weight_new)
+            logger.info(f'Load PIA, convert conv_in from {list(conv_in_weight_shape)} to '
+                        f'{conv_in_weight_pia_shape}')
+
+            # 1. load weight
+            for k, v in motion_state_dict.items():
+                if 'conv_in' in k or 'motion_modules' in k:
+                    # logger.info(f'Update {k}.')
+                    state_dict[k] = v
+        else:
+            # merge the state dicts
+            state_dict.update(motion_state_dict)
 
         # load the weights into the model
         m, u = model.load_state_dict(state_dict, strict=False)
@@ -578,6 +597,15 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         logger.info(f"Loaded {sum(params) / 1e6}M-parameter motion module")
 
         return model
+
+    def load_state_dict(self, state_dict: Mapping[str, Any], strict: bool = True):
+        if self.conv_in.weight.shape[1] == 9:
+            if state_dict['conv_in.weight'].shape[1] != 9:
+                state_dict['conv_in.weight'] = torch.cat(
+                    [state_dict['conv_in.weight'],
+                    self.conv_in.weight[:, 4:, ...]], dim=1)
+                logger.info('Update conv_in.weight from 4 to 9 channels for dreamBooth UNet.')
+        return super().load_state_dict(state_dict, strict)
 
 
     @property

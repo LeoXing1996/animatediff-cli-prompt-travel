@@ -610,7 +610,8 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         device,
         generator,
         latents=None,
-        is_i2v=False,
+        construct_latent=False,
+        is_pia=False,
         input_img: Path = None,
     ):
         shape = (
@@ -631,7 +632,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         else:
             latents = latents
 
-        if is_i2v and input_img.exists():
+        if construct_latent and input_img.exists():
             from PIL import Image
             img_ten = self.image_processor.preprocess(
                 Image.open(input_img).convert('RGB'),
@@ -643,6 +644,28 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             latents = latents.unsqueeze(2).repeat(batch_size, 1, video_length, 1, 1)
             latents = self.i2v_scheduler.prepare_latent(latents)
             return latents.to(device, dtype)
+
+        elif is_pia and input_img.exists():
+            from PIL import Image
+            img_ten = self.image_processor.preprocess(
+                Image.open(input_img).convert('RGB'),
+                height=height,
+                width=width).to(self.vae.device, self.vae.dtype)
+            cond_latents = self.vae.encode(img_ten).latent_dist.sample(
+                generator=generator)
+            cond_latents = cond_latents * self.vae.config.scaling_factor
+            cond_latents = cond_latents.unsqueeze(2).repeat(batch_size, 1, video_length, 1, 1)
+            motion_list = [1.0, 0.9, 0.85, 0.85, 0.85]
+            motion_list = motion_list + [0.8] * (16 - len(motion_list))
+            motion_mask = torch.ones(
+                latents.shape[0],
+                1,
+                latents.shape[2],
+                latents.shape[3],
+                latents.shape[4])
+            motion_mask = motion_mask * torch.FloatTensor(motion_list).view(1, 1, -1, 1, 1)
+            motion_mask = motion_mask.to(cond_latents.device, cond_latents.dtype)
+            latents = torch.cat([latents, motion_mask, cond_latents], dim=1)
 
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
@@ -1888,6 +1911,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         construct_latent_for_i2v: bool = False,
         input_img: Optional[Path] = None,
         i2v_strength: float = 0.85,
+        is_pia: bool = False,
         **kwargs,
     ):
         global C_REF_MODE
@@ -2205,7 +2229,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         timesteps = self.scheduler.timesteps
 
         if construct_latent_for_i2v and input_img.exists():
-            self.enable_i2v = True
+            self.enable_i2v_scheduler = True
             strength = i2v_strength
             total_timesteps = int(num_inference_steps / strength)
             self.i2v_scheduler = self.build_i2v_scheduler(num_inference_steps, strength)
@@ -2214,7 +2238,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             timesteps = self.i2v_scheduler.timesteps[:-1]
             logger.info(f'Denoising timesteps: {timesteps}')
         else:
-            self.enable_i2v = False
+            self.enable_i2v_scheduler = False
 
         # 5. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
@@ -2229,6 +2253,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             generator,
             latents,
             construct_latent_for_i2v,
+            is_pia,
             input_img,
         )
 
@@ -2283,8 +2308,13 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             for i, t in enumerate(timesteps):
                 stopwatch_start()
 
+                noise_pred_shape = [
+                    latents.shape[0] * (2 if do_classifier_free_guidance else 1),
+                    4,  # NOTE: fix channel as 4, since PIA use 9 channel latent
+                    *latents.shape[2:]
+                ]
                 noise_pred = torch.zeros(
-                    (latents.shape[0] * (2 if do_classifier_free_guidance else 1), *latents.shape[1:]),
+                    noise_pred_shape,
                     device=latents.device,
                     dtype=latents.dtype,
                 )
@@ -2417,7 +2447,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                                 .to(device)
                                 .repeat(2 if do_classifier_free_guidance else 1, 1, 1, 1, 1)
                             )
-                            if self.enable_i2v:
+                            if self.enable_i2v_scheduler:
                                 control_model_input = self.i2v_scheduler.scale_model_input(latent_model_input, t)[:, :, 0]
                             else:
                                 control_model_input = self.scheduler.scale_model_input(latent_model_input, t)[:, :, 0]
@@ -2425,7 +2455,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
 
                             down_samples, mid_sample = self.controlnet_map[type_str](
                                 control_model_input,
-                                t if not self.enable_i2v else self.i2v_scheduler.prepare_t(t),
+                                t if not self.enable_i2v_scheduler else self.i2v_scheduler.prepare_t(t),
                                 encoder_hidden_states=controlnet_prompt_embeds,
                                 controlnet_cond=cont_var["image"],
                                 conditioning_scale=cont_var["cond_scale"],
@@ -2468,7 +2498,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                         .to(device)
                         .repeat(2 if do_classifier_free_guidance else 1, 1, 1, 1, 1)
                     )
-                    if self.enable_i2v:
+                    if self.enable_i2v_scheduler:
                         latent_model_input = self.i2v_scheduler.scale_model_input(latent_model_input, t)
                     else:
                         latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
@@ -2490,7 +2520,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                                 1,
                             ),
                         )
-                        if self.enable_i2v:
+                        if self.enable_i2v_scheduler:
                             ref_xt = self.i2v_scheduler.scale_model_input(ref_xt, t)
                         else:
                             ref_xt = self.scheduler.scale_model_input(ref_xt, t)
@@ -2500,7 +2530,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                         C_REF_MODE = "write"
                         self.unet(
                             ref_xt,
-                            t if not self.enable_i2v else self.i2v_scheduler.prepare_t(t),
+                            t if not self.enable_i2v_scheduler else self.i2v_scheduler.prepare_t(t),
                             encoder_hidden_states=cur_prompt,
                             cross_attention_kwargs=cross_attention_kwargs,
                             return_dict=False,
@@ -2515,7 +2545,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                     stopwatch_record("normal unet start")
                     pred = self.unet(
                         latent_model_input.to(self.unet.device, self.unet.dtype),
-                        t if not self.enable_i2v else self.i2v_scheduler.prepare_t(t),
+                        t if not self.enable_i2v_scheduler else self.i2v_scheduler.prepare_t(t),
                         encoder_hidden_states=cur_prompt,
                         cross_attention_kwargs=cross_attention_kwargs,
                         down_block_additional_residuals=down_block_res_samples,
@@ -2536,7 +2566,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
-                if self.enable_i2v:
+                if self.enable_i2v_scheduler:
                     latents = self.i2v_scheduler.step(
                         model_output=noise_pred,
                         timestep=t,
@@ -2544,6 +2574,17 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                         **extra_step_kwargs,
                         return_dict=False,
                     )[0]
+                elif is_pia:
+                    noisy_latent = latents[:, :4, ...]
+                    cond_latent = latents[:, 4:, ...]
+                    denoised_latent = self.scheduler.step(
+                        model_output=noise_pred,
+                        timestep=t,
+                        sample=noisy_latent.to(latents_device),
+                        **extra_step_kwargs,
+                        return_dict=False,
+                    )[0]
+                    latents = torch.cat([denoised_latent, cond_latent], dim=1)
                 else:
                     latents = self.scheduler.step(
                         model_output=noise_pred,
@@ -2576,6 +2617,8 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             show_gpu("after unload ip_adapter")
 
         # Return latents if requested (this will never be a dict)
+        if is_pia:
+            latents = latents[:, :4, ...]
         if not output_type == "latent":
             video = self.decode_latents(latents)
         else:

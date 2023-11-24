@@ -256,6 +256,7 @@ def create_pipeline(
     use_xformers: bool = True,
     is_hires: bool = False,
     is_2d: bool = False,
+    is_pia: bool = False,
 ) -> Union[AnimationPipeline, StableDiffusionPipeline]:
     """Create an AnimationPipeline from a pretrained model.
     Uses the base_model argument to load or download the pretrained reference pipeline model."""
@@ -290,6 +291,7 @@ def create_pipeline(
             motion_module_path=motion_module,
             subfolder="unet",
             unet_additional_kwargs=infer_config.unet_additional_kwargs,
+            is_pia=is_pia,
         )
     else:
         unet: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(
@@ -853,6 +855,7 @@ def run_inference(
     construct_latent_for_i2v: bool = False,
     input_img: Optional[Path] = None,
     i2v_strength: float = 0.85,
+    is_pia: bool = False,
 ):
     out_dir = Path(out_dir)  # ensure out_dir is a Path
 
@@ -883,6 +886,7 @@ def run_inference(
         construct_latent_for_i2v=construct_latent_for_i2v,
         input_img=input_img,
         i2v_strength=i2v_strength,
+        is_pia=is_pia,
     )
 
     logger.info("Generation complete, saving...")

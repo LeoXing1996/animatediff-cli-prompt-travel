@@ -26,7 +26,7 @@ from animatediff.settings import (CKPT_EXTENSIONS, InferenceConfig,
 from animatediff.utils.civitai2config import generate_config_from_civitai_info
 from animatediff.utils.model import checkpoint_to_pipeline, get_base_model
 from animatediff.utils.pipeline import get_context_params, send_to_device
-from animatediff.utils.util import (extract_frames, is_v2_motion_module,
+from animatediff.utils.util import (extract_frames, is_v2_motion_module, is_pia_motion_module,
                                     path_from_cwd, save_frames, save_imgs,
                                     save_video)
 from animatediff.utils.wild_card import replace_wild_card
@@ -331,6 +331,7 @@ def generate(
     logger.info(f"Using generation config: {path_from_cwd(config_path)}")
     model_config: ModelConfig = get_model_config(config_path)
     is_v2 = is_v2_motion_module(model_config.motion_module)
+    is_pia = is_pia_motion_module(model_config.motion_module)
     infer_config: InferenceConfig = get_infer_config(is_v2)
 
     is_i2v = False
@@ -401,6 +402,7 @@ def generate(
             model_config=model_config,
             infer_config=infer_config,
             use_xformers=use_xformers,
+            is_pia=is_pia,
         )
         last_model_path = model_config.path.resolve()
     else:
@@ -507,6 +509,7 @@ def generate(
                 construct_latent_for_i2v=construct_latent_for_i2v,
                 input_img=input_image,
                 i2v_strength=strength,
+                is_pia=is_pia,
             )
             outputs.append(output)
             torch.cuda.empty_cache()

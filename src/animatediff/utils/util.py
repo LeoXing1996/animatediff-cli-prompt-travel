@@ -273,4 +273,8 @@ def extract_frames(movie_file_path, fps, out_dir, aspect_ratio, duration):
 
 
 def is_v2_motion_module(motion_module_path:Path):
-    return (motion_module_path.stem in ["mm_sd_v15_v2", 'mm_pia'] )     # TODO Decent identification method
+    return (motion_module_path.stem in ["mm_sd_v15_v2", 'mm_pia', "pia"] )     # TODO Decent identification method
+
+
+def is_pia_motion_module(motion_module_path:Path):
+    return (motion_module_path.stem in ["mm_pia", "pia"] )
